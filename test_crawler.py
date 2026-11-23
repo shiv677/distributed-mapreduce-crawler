@@ -70,3 +70,32 @@ async def test_crawler_end_to_end():
     stats = await crawler.run(max_tasks=5)
     assert stats.total_completed >= 2
     assert stats.total_words_extracted > 0
+
+
+def test_extract_links_preserves_http_scheme():
+    raw = '<a href="/docs/intro">Intro</a>'
+    links = extract_links(raw, "http://plain.example.com")
+    assert links == ["http://plain.example.com/docs/intro"]
+
+
+@pytest.mark.asyncio
+async def test_crawler_multiline_title_and_concurrency():
+    active = 0
+    peak_active = 0
+
+    async def slow_fetcher(url: str) -> str:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.03)
+        active -= 1
+        return "<html><head><title>\n  Multiline\n  Title\n</title></head><body>Hello world</body></html>"
+
+    crawler = DistributedMapReduceCrawler(max_concurrency=3, max_depth=0, fetcher=slow_fetcher)
+    crawler.seed(["https://a.example.org", "https://b.example.org", "https://c.example.org"])
+    stats = await crawler.run(max_tasks=3)
+    assert stats.total_completed == 3
+    assert peak_active >= 2
+
+    row = crawler.queue.conn.execute("SELECT title FROM documents WHERE url = 'https://a.example.org'").fetchone()
+    assert "Multiline" in row["title"] and "Title" in row["title"]

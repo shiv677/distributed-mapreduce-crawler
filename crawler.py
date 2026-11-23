@@ -28,12 +28,14 @@ def clean_html_content(raw_html: str) -> str:
 def extract_links(raw_html: str, base_url: str) -> List[str]:
     hrefs = re.findall(r'href=[\'"]([^\'"]+)[\'"]', raw_html, flags=re.IGNORECASE)
     valid_links = []
+    parsed_base = urlparse(base_url)
+    base_scheme = parsed_base.scheme or "https"
     base_domain = extract_domain(base_url)
     for h in hrefs:
         if h.startswith("http://") or h.startswith("https://"):
             valid_links.append(h)
         elif h.startswith("/") and base_domain:
-            valid_links.append(f"https://{base_domain}{h}")
+            valid_links.append(f"{base_scheme}://{base_domain}{h}")
     return sorted(list(set(valid_links)))
 
 
@@ -222,7 +224,7 @@ class DistributedMapReduceCrawler:
                 text = clean_html_content(html)
                 content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 links = extract_links(html, task.url)
-                title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE)
+                title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
                 title = title_match.group(1).strip() if title_match else task.url
 
                 doc = ExtractedDocument(
@@ -252,9 +254,15 @@ class DistributedMapReduceCrawler:
     async def run(self, max_tasks: int = 20) -> CrawlStats:
         processed = 0
         while processed < max_tasks:
-            task = self.queue.claim_next_task()
-            if not task:
+            batch_limit = min(self.max_concurrency, max_tasks - processed)
+            batch: List[CrawlTask] = []
+            for _ in range(batch_limit):
+                task = self.queue.claim_next_task()
+                if not task:
+                    break
+                batch.append(task)
+            if not batch:
                 break
-            await self.crawl_task(task)
-            processed += 1
+            await asyncio.gather(*(self.crawl_task(t) for t in batch))
+            processed += len(batch)
         return self.queue.get_stats()
